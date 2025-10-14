@@ -1,0 +1,262 @@
+from google.colab import drive
+drive.mount('/content/drive')
+%cd /content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier
+%pwd
+
+# resnet_fruits_training.py
+# Fine-tune ResNet-50 on Fruits-360 (or similar) using labels CSV metadata.
+# - Expects a labels CSV with columns: split (train/test) or separate train/test CSVs
+# - Produces checkpoints and prints training/validation metrics
+
+import os
+from pathlib import Path
+import pandas as pd
+from PIL import Image
+
+import torch
+from torch import nn, optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+from sklearn.model_selection import train_test_split
+
+# ---------------------- Configuration ----------------------
+ROOT_IMAGE_DIR = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/Fruits-360/fruits-360_100x100/fruits-360"
+LABELS_CSV = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier/labels.csv"
+CLASSES_CSV = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier/classes.csv"
+OUTPUT_DIR = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier/"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+BATCH_SIZE = 64
+NUM_WORKERS = 4
+NUM_EPOCHS = 8
+LEARNING_RATE = 1e-3
+WEIGHT_DECAY = 1e-4
+IMAGE_SIZE = 224  # ResNet default
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", DEVICE)
+
+# ImageNet mean/std (pretrained ResNet expects these)
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+# ---------------------- Dataset ----------------------
+class FruitDataset(Dataset):
+    """
+    DataFrame expected columns:
+      - 'relative_path' or 'filename' (path relative to ROOT_IMAGE_DIR)
+      - 'label_id' or 'label_index' (integer class)
+      - optionally 'split'
+    """
+    def __init__(self, df, root_dir, transform=None, path_col="relative_path", label_col="label_id"):
+        self.df = df.reset_index(drop=True)
+        self.root_dir = Path(root_dir)
+        self.transform = transform
+        self.path_col = path_col
+        self.label_col = label_col
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        rel_path = row[self.path_col]
+        image_path = self.root_dir.joinpath(rel_path)
+        # Robust open
+        with Image.open(image_path) as im:
+            im = im.convert("RGB")
+            if self.transform:
+                im = self.transform(im)
+        label = int(row[self.label_col])
+        return im, label
+
+# ---------------------- Transforms ----------------------
+train_transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+    transforms.ToTensor(),
+    transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
+])
+
+val_transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
+])
+
+# ---------------------- Load CSV and split ----------------------
+df = pd.read_csv(LABELS_CSV)
+
+# Accept both column name variants
+path_col = "relative_path" if "relative_path" in df.columns else "filename"
+label_col = "label_id" if "label_id" in df.columns else ("label_index" if "label_index" in df.columns else "label")
+
+# If CSV already contains 'split' column, use it
+if "split" in df.columns:
+    train_df = df[df["split"] == "training"].reset_index(drop=True)
+    val_df   = df[df["split"] == "test"].reset_index(drop=True)
+else:
+    # create stratified split if not provided
+    train_df, val_df = train_test_split(df, test_size=0.2, stratify=df[label_col], random_state=42)
+    train_df = train_df.reset_index(drop=True)
+    val_df = val_df.reset_index(drop=True)
+
+# Infer number of classes
+if os.path.exists(CLASSES_CSV):
+    classes_df = pd.read_csv(CLASSES_CSV)
+    NUM_CLASSES = len(classes_df)
+else:
+    NUM_CLASSES = int(df[label_col].nunique())
+
+print(f"Train samples: {len(train_df)}, Val samples: {len(val_df)}, Num classes: {NUM_CLASSES}")
+
+# ---------------------- Datasets and DataLoaders ----------------------
+train_ds = FruitDataset(train_df, ROOT_IMAGE_DIR, transform=train_transform, path_col=path_col, label_col=label_col)
+val_ds   = FruitDataset(val_df,   ROOT_IMAGE_DIR, transform=val_transform,   path_col=path_col, label_col=label_col)
+
+print("finished initializing train_ds and val_ds")
+
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=NUM_WORKERS, pin_memory=True)
+val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
+
+# ---------------------- Model (ResNet50) ----------------------
+# Load pretrained ResNet50 (modern torchvision API)
+model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+
+# Replace final FC head to match number of classes
+num_ftrs = model.fc.in_features
+model.fc = nn.Linear(num_ftrs, NUM_CLASSES)
+
+model = model.to(DEVICE)
+
+# ---------------------- Optionally freeze backbone (feature-extraction) ----------------------
+def set_parameter_requires_grad(model, feature_extracting=True):
+    if feature_extracting:
+        for param in model.parameters():
+            param.requires_grad = False
+        # ensure classifier head params remain trainable
+        for param in model.fc.parameters():
+            param.requires_grad = True
+
+FEATURE_EXTRACT = True  # set False to train entire model from the start
+set_parameter_requires_grad(model, feature_extracting=FEATURE_EXTRACT)
+
+# ---------------------- Loss, optimizer, scheduler ----------------------
+criterion = nn.CrossEntropyLoss()
+
+# Only update parameters that require gradients
+params_to_update = [p for p in model.parameters() if p.requires_grad]
+optimizer = optim.AdamW(params_to_update, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+# Simple LR scheduler (step down)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=0.1)
+
+# ---------------------- Training / Evaluation Helpers ----------------------
+def train_one_epoch(model, loader, optimizer, criterion, device):
+    model.train()
+    running_loss = 0.0
+    running_corrects = 0
+    total = 0
+    for imgs, labels in loader:
+        imgs = imgs.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        # Forward
+        outputs = model(imgs)               # logits shape (B, C)
+        loss = criterion(outputs, labels)   # scalar
+
+        # Backward + optimize
+        optimizer.zero_grad()   # zero accumulated grads
+        loss.backward()         # compute gradients
+        optimizer.step()        # update params
+
+        # Stats
+        running_loss += loss.item() * imgs.size(0)
+        preds = outputs.argmax(dim=1)
+        running_corrects += (preds == labels).sum().item()
+        total += imgs.size(0)
+
+    epoch_loss = running_loss / total
+    epoch_acc = running_corrects / total
+    return epoch_loss, epoch_acc
+
+def eval_one_epoch(model, loader, criterion, device):
+    model.eval()
+    running_loss = 0.0
+    running_corrects = 0
+    total = 0
+    with torch.no_grad():
+        for imgs, labels in loader:
+            imgs = imgs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            outputs = model(imgs)
+            loss = criterion(outputs, labels)
+
+            running_loss += loss.item() * imgs.size(0)
+            preds = outputs.argmax(dim=1)
+            running_corrects += (preds == labels).sum().item()
+            total += imgs.size(0)
+
+    return running_loss / total, running_corrects / total
+
+# ---------------------- Training loop ----------------------
+best_val_acc = 0.0
+for epoch in range(NUM_EPOCHS):
+    train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE)
+    val_loss, val_acc = eval_one_epoch(model, val_loader, criterion, DEVICE)
+    scheduler.step()
+
+    print(f"Epoch {epoch+1}/{NUM_EPOCHS}  train_loss={train_loss:.4f} train_acc={train_acc:.4f}  val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
+
+    # Save checkpoint if improved
+    if val_acc > best_val_acc:
+        best_val_acc = val_acc
+        ckpt_path = os.path.join(OUTPUT_DIR, "best_resnet50_fruits.pth")
+        torch.save({
+            "epoch": epoch + 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "val_acc": val_acc
+        }, ckpt_path)
+        print(f"Saved best model to {ckpt_path} (val_acc={val_acc:.4f})")
+
+# ---------------------- Example inference ----------------------
+def predict_image(model, image_path, transform, device, class_map):
+    model.eval()
+    img = Image.open(image_path).convert("RGB")
+    x = transform(img).unsqueeze(0).to(device)
+    with torch.no_grad():
+        logits = model(x)
+        probs = torch.nn.functional.softmax(logits, dim=1)
+        top_prob, top_idx = probs.topk(1, dim=1)
+    label_idx = int(top_idx[0,0].item())
+    return class_map[label_idx], float(top_prob[0,0].item())
+
+# Build class_map (index -> name)
+if os.path.exists(CLASSES_CSV):
+    classes_df = pd.read_csv(CLASSES_CSV)
+    class_map = dict(zip(classes_df['class_index'], classes_df['class_name']))
+else:
+    # fallback: numeric mapping
+    uniq = sorted(df[label_col].unique())
+    class_map = {i: str(i) for i in uniq}
+
+# Quick sample prediction (if training produced at least one sample)
+if len(train_df) > 0:
+    sample_rel = train_df.iloc[0][path_col]
+    sample_path = os.path.join(ROOT_IMAGE_DIR, sample_rel)
+    pred_label, pred_conf = predict_image(model, sample_path, val_transform, DEVICE, class_map)
+    print("Example prediction:", pred_label, pred_conf)
+
+
+'''!git config --global user.email "he.carlitos@gmail.com"
+!git config --global user.name "Carlos"
+!git add .
+!git commit -m "Ready to train"
+!git push https://cahehe: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@github.com/cahehe/fruit-image-classifier.git'''
+!git status
+#!git commit -m "Ready to train"
+#!git push https://cahehe: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@github.com/cahehe/fruit-image-classifier.git

@@ -1,0 +1,55 @@
+from google.colab import drive
+drive.mount('/content/drive')
+%cd /content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier
+
+import os
+import pandas as pd
+
+def generate_csv_from_fruits360(base_dir, output_csv="fruits360_data.csv"):
+    """
+    Create a CSV with file paths, labels, and split info from Fruits360 dataset.
+    - base_dir should point to fruits-360_100x100 (or other variant).
+    """
+    records = []  # will hold [filepath, label, split]
+    seen = set()
+    # The dataset has 2 main splits
+    for split in ["Training", "Test"]:
+        split_dir = os.path.join(base_dir, split)  # e.g. ".../fruits-360_100x100/Training"
+
+        # Each label is a folder, like "Apple Golden 1"
+        for label in os.listdir(split_dir):
+            label_dir = os.path.join(split_dir, label)
+
+            if not os.path.isdir(label_dir):
+                continue  # skip files, we only want folders
+            #seen.add("label dir:{}\n".format(label_dir))
+            # Loop over all images in that label folder
+            for fname in os.listdir(label_dir):
+                #print('label_dir:{}  fname:{}'.format(label_dir, fname))
+                if fname.lower().endswith((".png", ".jpg", ".jpeg")):
+                    #print('label_dir:{}  fname:{}'.format(label_dir, fname))
+                    filepath = os.path.join(label_dir, fname)
+                    records.append([filepath, label, split])
+
+    # Create dataframe (like Excel table)
+    df = pd.DataFrame(records, columns=["filepath", "label", "split"])
+    #print("fruits:{}".format(seen))
+    #print("records:{}".format(records))
+    # Save to CSV
+    #path - /content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier
+    df.to_csv(output_csv, index=False)
+    print(f"CSV saved to {output_csv}, total rows: {len(df)}")
+
+    return df
+
+
+# Example usage: change to match your tree
+base_dir = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/Fruits-360/fruits-360_100x100/fruits-360"
+df = generate_csv_from_fruits360(base_dir)
+
+# Show first 5 rows
+print(df.head())
+
+
+%pwd
+
