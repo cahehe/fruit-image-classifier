@@ -13,8 +13,8 @@
 # ---
 
 # %% colab={"base_uri": "https://localhost:8080/", "height": 71} id="NvKsIOeiyNnM" executionInfo={"status": "ok", "timestamp": 1760238570164, "user_tz": 240, "elapsed": 45117, "user": {"displayName": "Carlos", "userId": "17576890038933523144"}} outputId="1ef6b08c-884f-445c-b75d-3b5d9877b9e2"
-from google.colab import drive
-drive.mount('/content/drive')
+#from google.colab import drive
+#drive.mount('/content/drive')
 # %cd /content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier
 # %pwd
 
@@ -23,7 +23,6 @@ drive.mount('/content/drive')
 # Fine-tune ResNet-50 on Fruits-360 (or similar) using labels CSV metadata.
 # - Expects a labels CSV with columns: split (train/test) or separate train/test CSVs
 # - Produces checkpoints and prints training/validation metrics
-
 import os
 from pathlib import Path
 import pandas as pd
@@ -36,6 +35,7 @@ from torchvision import transforms, models
 from sklearn.model_selection import train_test_split
 
 # ---------------------- Configuration ----------------------
+print("Configuration step")
 ROOT_IMAGE_DIR = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/Fruits-360/fruits-360_100x100/fruits-360"
 LABELS_CSV = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier/labels.csv"
 CLASSES_CSV = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier/classes.csv"
