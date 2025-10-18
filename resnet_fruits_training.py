@@ -13,6 +13,7 @@ from collections import OrderedDict
 import types
 import __main__
 import torch
+import sys
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
@@ -50,7 +51,7 @@ class FruitDataset(Dataset):
         return im, label
 
 # ---------------------- Training / Eval functions ----------------------
-def train_one_epoch(model, loader, optimizer, criterion, device):
+def train_one_epoch(model, loader, optimizer, criterion, device, logger):
     model.train()
     running_loss = 0.0
     running_corrects = 0
@@ -69,15 +70,14 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
         running_loss += loss.item() * imgs.size(0)
         preds = outputs.argmax(dim=1)
         running_corrects += (preds == labels).sum().item()
-        total += imgs.size(0)
-        print(f"Training Epoch. Values so far - Running Loss: {running_loss:.4f}, Running Corrects: {running_corrects:.4f}, Total: {total}")
+        total += imgs.size(0)        
 
     epoch_loss = running_loss / total
     epoch_acc = running_corrects / total
-    print(f"Training Epoch finished - Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.4f}")
+    logger.info(f"Training Epoch finished - Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.4f}")
     return epoch_loss, epoch_acc
 
-def eval_one_epoch(model, loader, criterion, device):
+def eval_one_epoch(model, loader, criterion, device, logger):
     model.eval()
     running_loss = 0.0
     running_corrects = 0
@@ -93,23 +93,31 @@ def eval_one_epoch(model, loader, criterion, device):
             running_loss += loss.item() * imgs.size(0)
             preds = outputs.argmax(dim=1)
             running_corrects += (preds == labels).sum().item()
-            total += imgs.size(0)
-            print(f"Evaluating Epoch. Values so far - Running Loss: {running_loss:.4f}, Running Corrects: {running_corrects:.4f}, Total: {total}")
+            total += imgs.size(0)            
 
-    print(f"Eval Epoch finished - Running_loss: {running_loss:.4f}, Running_corrects: {running_corrects:.4f}, Total: {total:.4f}")
+    logger.info(f"Eval Epoch finished - Running_loss: {running_loss:.4f}, Running_corrects: {running_corrects:.4f}, Total: {total:.4f}")
     return running_loss / total, running_corrects / total
 
 def main():
+    # ---------------------- Logging ----------------------
+    logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s %(levelname)s: %(message)s",
+      handlers=[logging.StreamHandler(sys.stdout)],
+      force=True  # Only works in Python 3.8+
+    )
+    logger = logging.getLogger("train")
+
     # ---------------------- Configuration ----------------------
-    print("Configuration step")
-    ROOT_IMAGE_DIR = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/Fruits-360/fruits-360_100x100/fruits-360"
+    logger.info("Configuring")
+    '''ROOT_IMAGE_DIR = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/Fruits-360/fruits-360_100x100/fruits-360"
     LABELS_CSV = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier/labels.csv"
     CLASSES_CSV = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier/classes.csv"
-    OUTPUT_DIR = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier"
-    '''ROOT_IMAGE_DIR = "/Users/carloshehe/Desktop/Fruits-360/fruits-360_100x100/fruits-360"
+    OUTPUT_DIR = "/content/drive/MyDrive/Colab Notebooks/Projects/Fruits Image Classifier/fruit-image-classifier"'''
+    ROOT_IMAGE_DIR = "/Users/carloshehe/Desktop/Fruits-360/fruits-360_100x100/fruits-360"
     LABELS_CSV = "/Users/carloshehe/Desktop/Projects/fruit-image-classifier/labels.csv"
     CLASSES_CSV = "/Users/carloshehe/Desktop/Projects/fruit-image-classifier/classes.csv"
-    OUTPUT_DIR = "/Users/carloshehe/Desktop/Projects/fruit-image-classifier"'''
+    OUTPUT_DIR = "/Users/carloshehe/Desktop/Projects/fruit-image-classifier"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     BATCH_SIZE = 64
@@ -120,15 +128,11 @@ def main():
     IMAGE_SIZE = 224  # ResNet default
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device:", DEVICE)
+    logger.info(f"Using device: {DEVICE}")
 
     # ImageNet mean/std (pretrained ResNet expects these)
     IMAGENET_MEAN = [0.485, 0.456, 0.406]
-    IMAGENET_STD  = [0.229, 0.224, 0.225]
-
-    # ---------------------- Logging ----------------------
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    logger = logging.getLogger("train")
+    IMAGENET_STD  = [0.229, 0.224, 0.225]    
 
     # ---------------------- Transforms ----------------------
     train_transform = transforms.Compose([
@@ -236,26 +240,25 @@ def main():
 # ---------------------- Resume / checkpoint setup ----------------------
     start_epoch = 0
     best_val_acc = 0.0
-    ckpt = find_latest_checkpoint(OUTPUT_DIR)
+    ckpt = find_latest_checkpoint(OUTPUT_DIR, logger)
     if ckpt:
-        try:
-            print("loaded existing ckpt")
-            start_epoch, best_val_acc = load_checkpoint(ckpt, model, optimizer=optimizer, scheduler=scheduler, device=DEVICE)
-            print("start_epoch:{} best_val_acc:{}".format(start_epoch, best_val_acc))
-            #logger.info(f"Resuming from checkpoint. start_epoch={start_epoch}, best_val_acc={best_val_acc:.4f}")
-            print(f"Resuming from checkpoint. start_epoch={start_epoch}, best_val_acc={best_val_acc:.4f}")
+        try:            
+            logger.info(f"Found existing checkpoint: {ckpt}. Resuming training.")
+            start_epoch, best_val_acc = load_checkpoint(ckpt, model, logger, optimizer=optimizer, scheduler=scheduler, device=DEVICE)            
+            logger.info(f"Resuming from checkpoint. start_epoch={start_epoch}, best_val_acc={best_val_acc:.4f}")            
         except Exception as e:
             logger.warning(f"Failed to load checkpoint {ckpt}: {e}\\nStarting from scratch.")
 
     # ---------------------- Training loop ----------------------
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
-            train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE)
+            logger.info(f"Starting epoch {epoch} out of {NUM_EPOCHS}")
+            train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE, logger)
 
             # Optional quick eval on training set for sanity-check (small overhead)
             train_eval_loss, train_eval_acc = eval_one_epoch(model, train_loader, criterion, DEVICE)
 
-            val_loss, val_acc = eval_one_epoch(model, val_loader, criterion, DEVICE)
+            val_loss, val_acc = eval_one_epoch(model, val_loader, criterion, DEVICE, logger)
 
             scheduler.step()
 
@@ -271,13 +274,13 @@ def main():
                 "best_val_acc": best_val_acc
             }
             # save latest checkpoint always
-            save_checkpoint(ckpt_state, os.path.join(OUTPUT_DIR, "latest.pth"))
+            save_checkpoint(ckpt_state, os.path.join(OUTPUT_DIR, "latest.pth"), logger)
 
             # save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_path = os.path.join(OUTPUT_DIR, f"best_epoch_{epoch+1:03d}_valacc_{val_acc:.4f}.pth")
-                save_checkpoint(ckpt_state, best_path)
+                save_checkpoint(ckpt_state, best_path, logger)
                 logger.info(f"Saved new best model to {best_path} (val_acc={val_acc:.4f})")
 
     except Exception as e:
@@ -291,7 +294,7 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                 "best_val_acc": best_val_acc
-            }, os.path.join(OUTPUT_DIR, "latest_on_error.pth"))
+            }, os.path.join(OUTPUT_DIR, "latest_on_error.pth"), logger)
             logger.info("Saved latest checkpoint to latest_on_error.pth")
         except Exception as se:
             logger.error(f"Failed to save checkpoint on error: {se}")
@@ -308,7 +311,7 @@ def main():
 
     if best_ckpt:
         logger.info(f"Loading best checkpoint for final evaluation: {best_ckpt}")
-        load_checkpoint(best_ckpt, model, device=DEVICE)
+        load_checkpoint(best_ckpt, model, logger, device=DEVICE)
 
     if test_loader is not None:
         test_loss, test_acc = eval_one_epoch(model, test_loader, criterion, DEVICE)
