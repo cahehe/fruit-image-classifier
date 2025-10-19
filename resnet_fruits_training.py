@@ -1,3 +1,18 @@
+# ---
+# jupyter:
+#   jupytext:
+#     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.18.0
+#   kernelspec:
+#     display_name: Python 3
+#     name: python3
+# ---
+
+# %%
 # resnet_fruits_training.py
 # Fine-tune ResNet-50 on Fruits-360 (or similar) using labels CSV metadata.
 # - Expects a labels CSV with columns: split (train/test) or separate train/test CSVs
@@ -100,8 +115,9 @@ def eval_one_epoch(model, loader, criterion, device, logger):
 
 def main():
     # ---------------------- Logging ----------------------
+    log_level = os.getenv("PYTHONLOGLEVEL", "INFO").upper()
     logging.basicConfig(
-      level=logging.INFO,
+      level=getattr(logging, log_level),      
       format="%(asctime)s %(levelname)s: %(message)s",
       handlers=[logging.StreamHandler(sys.stdout)],
       force=True  # Only works in Python 3.8+
@@ -165,7 +181,46 @@ def main():
         raise ValueError(f"Could not find path or label column. CSV columns: {df.columns.tolist()}")
 
     logger.info(f"Using path_col='{path_col}', label_col='{label_col}'")
+    logger.debug(f"DataFrame columns before sampling: {df.columns.tolist()}")
+    # ---------------------- Optional quick-sampling for tests ----------------------
+    # SAMPLE_FRACTION can be set via env var e.g. SAMPLE_FRACTION=0.01 python ...
+    try:
+        SAMPLE_FRACTION = float(os.environ.get("SAMPLE_FRACTION", "0.01"))
+    except Exception:
+        SAMPLE_FRACTION = 0.01
 
+    if SAMPLE_FRACTION <= 0 or SAMPLE_FRACTION > 1:
+        logger.warning(f"Invalid SAMPLE_FRACTION={SAMPLE_FRACTION}; skipping sampling and using full dataset.")
+        SAMPLE_FRACTION = 1.0
+
+    if SAMPLE_FRACTION < 1.0:
+        logger.info(f"Sampling a fraction of the dataset for quick tests: SAMPLE_FRACTION={SAMPLE_FRACTION}")
+        # Perform per-class stratified sampling and ensure at least 1 sample per class
+        def _sample_group(g):
+            n = max(1, int(len(g) * SAMPLE_FRACTION))
+            # If group has fewer rows than n, sample with replacement is not desired; just return the group
+            if n >= len(g):
+                return g
+            return g.sample(n=n, random_state=42)
+        
+        '''for name, g in df.groupby(label_col):
+            print("GROUP NAME:", name)
+            print("GROUP COLUMNS:", g.columns.tolist())   # you'll see label_index is present here
+            print("GROUP PASSED TO _sample_group (when include_groups=False) will NOT contain label_index")
+            break
+        sampled_df = df.groupby(label_col, group_keys=False).apply(_sample_group, include_groups=False).reset_index(drop=False)'''
+        sampled_parts = []
+        for _, group in df.groupby(label_col):
+            n = max(1, int(len(group) * SAMPLE_FRACTION))
+            sampled_parts.append(group if n >= len(group) else group.sample(n=n, random_state=42))
+
+        sampled_df = pd.concat(sampled_parts, ignore_index=True)
+        df = sampled_df
+        logger.info(f"Sampled dataset rows: {len(sampled_df)} (original {len(df)})")
+        # replace df with sampled_df for downstream splitting
+        df = sampled_df
+
+    logger.debug(f"DataFrame columns after sampling: {df.columns.tolist()}")
     # If 'split' exists, normalize and use it; otherwise do stratified split
     if 'split' in df.columns:
         df['split_norm'] = df['split'].astype(str).str.strip().str.lower()
@@ -199,6 +254,7 @@ def main():
 
     # If test_df empty, you can set it equal to val_df or leave it empty - here we keep it empty if not provided.
     logger.info(f"Train samples: {len(train_df)}, Val samples: {len(val_df)}, Test samples: {len(test_df)}")
+    logger.debug(f"DataFrame columns after sampling and split: {df.columns.tolist()}")
 
     # ---------------------- Build datasets / loaders ----------------------
     train_ds = FruitDataset(train_df, ROOT_IMAGE_DIR, transform=train_transform, path_col=path_col, label_col=label_col)
@@ -217,6 +273,8 @@ def main():
     model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
     num_ftrs = model.fc.in_features
     # num classes
+    if label_col not in df.columns:
+        raise ValueError(f"Label column '{label_col}' not found in DataFrame columns: {df.columns.tolist()}")
     NUM_CLASSES = int(df[label_col].nunique())
     model.fc = nn.Linear(num_ftrs, NUM_CLASSES)
     model = model.to(DEVICE)
@@ -256,7 +314,7 @@ def main():
             train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE, logger)
 
             # Optional quick eval on training set for sanity-check (small overhead)
-            train_eval_loss, train_eval_acc = eval_one_epoch(model, train_loader, criterion, DEVICE)
+            train_eval_loss, train_eval_acc = eval_one_epoch(model, train_loader, criterion, DEVICE, logger)
 
             val_loss, val_acc = eval_one_epoch(model, val_loader, criterion, DEVICE, logger)
 
@@ -314,7 +372,7 @@ def main():
         load_checkpoint(best_ckpt, model, logger, device=DEVICE)
 
     if test_loader is not None:
-        test_loss, test_acc = eval_one_epoch(model, test_loader, criterion, DEVICE)
+        test_loss, test_acc = eval_one_epoch(model, test_loader, criterion, DEVICE, logger)
         logger.info(f"TEST final: loss={test_loss:.4f}, acc={test_acc:.4f}")
     else:
         logger.info("No test split provided - skipping final test evaluation.")
