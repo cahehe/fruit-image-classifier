@@ -185,7 +185,7 @@ def main():
     # ---------------------- Optional quick-sampling for tests ----------------------
     # SAMPLE_FRACTION can be set via env var e.g. SAMPLE_FRACTION=0.01 python ...
     try:
-        SAMPLE_FRACTION = float(os.environ.get("SAMPLE_FRACTION", "0.01"))
+        SAMPLE_FRACTION = float(os.environ.get("SAMPLE_FRACTION", "1.0"))
     except Exception:
         SAMPLE_FRACTION = 0.01
 
@@ -194,31 +194,17 @@ def main():
         SAMPLE_FRACTION = 1.0
 
     if SAMPLE_FRACTION < 1.0:
-        logger.info(f"Sampling a fraction of the dataset for quick tests: SAMPLE_FRACTION={SAMPLE_FRACTION}")
-        # Perform per-class stratified sampling and ensure at least 1 sample per class
-        def _sample_group(g):
-            n = max(1, int(len(g) * SAMPLE_FRACTION))
-            # If group has fewer rows than n, sample with replacement is not desired; just return the group
-            if n >= len(g):
-                return g
-            return g.sample(n=n, random_state=42)
-        
-        '''for name, g in df.groupby(label_col):
-            print("GROUP NAME:", name)
-            print("GROUP COLUMNS:", g.columns.tolist())   # you'll see label_index is present here
-            print("GROUP PASSED TO _sample_group (when include_groups=False) will NOT contain label_index")
-            break
-        sampled_df = df.groupby(label_col, group_keys=False).apply(_sample_group, include_groups=False).reset_index(drop=False)'''
+        logger.info(f"Sampling a fraction of the dataset for quick tests: SAMPLE_FRACTION={SAMPLE_FRACTION}")                        
         sampled_parts = []
+        original_len = len(df)
         for _, group in df.groupby(label_col):
             n = max(1, int(len(group) * SAMPLE_FRACTION))
             sampled_parts.append(group if n >= len(group) else group.sample(n=n, random_state=42))
-
+                
         sampled_df = pd.concat(sampled_parts, ignore_index=True)
-        df = sampled_df
-        logger.info(f"Sampled dataset rows: {len(sampled_df)} (original {len(df)})")
-        # replace df with sampled_df for downstream splitting
-        df = sampled_df
+        logger.info(f"Sampled dataset rows: {len(sampled_df)} (original {original_len})")
+
+        df = sampled_df   # replace df with sampled_df for downstream splitting
 
     logger.debug(f"DataFrame columns after sampling: {df.columns.tolist()}")
     # If 'split' exists, normalize and use it; otherwise do stratified split
